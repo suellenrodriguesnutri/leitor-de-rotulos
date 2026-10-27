@@ -135,6 +135,11 @@ textarea{font:16px/1.4 var(--body);color:var(--fg);background:var(--surface);bor
 .spin{width:18px;height:18px;border-radius:50%;border:3px solid currentColor;border-right-color:transparent;display:inline-block;vertical-align:-4px;margin-right:8px;animation:sp .8s linear infinite}
 @keyframes sp{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.spin{animation:none}}
+
+.ingbtn{display:flex;align-items:center;justify-content:center;gap:8px;background:var(--surface);color:var(--leaf);border:2px solid var(--leaf);font:700 1rem var(--body);border-radius:12px;padding:12px;cursor:pointer}
+.ingbtn:hover{background:var(--leaf-soft)}
+.bar2{height:6px;border-radius:99px;background:var(--line);overflow:hidden;margin-top:8px}
+.bar2 span{display:block;height:100%;background:var(--leaf);width:0;transition:width .2s}
 footer{margin-top:28px;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:.85rem;display:grid;gap:4px}
 footer b{color:var(--fg)}
 @media (max-width:380px){.row{grid-template-columns:minmax(0,1fr) 80px 30px}}
@@ -197,7 +202,13 @@ footer b{color:var(--fg)}
 
       <div class="ing">
         <label for="ingredientes">Ingredientes</label>
-        <small>Copie do jeito que está na embalagem, separado por vírgulas.</small>
+        <label class="ingbtn" for="fotoIng">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
+          Tirar foto dos ingredientes
+        </label>
+        <input type="file" id="fotoIng" accept="image/*" capture="environment" hidden>
+        <div id="ingStatus" aria-live="polite"></div>
+        <small>Ou copie do jeito que está na embalagem, separado por vírgulas.</small>
         <textarea id="ingredientes"></textarea>
       </div>
     </div>
@@ -427,6 +438,52 @@ $("foto").addEventListener("change",async e=>{
     if(code)await lookup(code);
     else status("err","Não consegui ler o código nessa foto. Tente de novo com o código no centro, bem perto e sem reflexo, ou digite os números que ficam embaixo das barras.");
   }catch(err){status("err","Não consegui abrir a foto. Tente tirar de novo.")}
+});
+
+/* ===== foto dos ingredientes (leitura de texto no próprio aparelho) ===== */
+const ist=$("ingStatus");
+function istatus(kind,html){ist.innerHTML=html?`<div class="status ${kind}">${html}</div>`:""}
+let tessLoading=null;
+function loadTesseract(){
+  if(window.Tesseract)return Promise.resolve();
+  if(tessLoading)return tessLoading;
+  tessLoading=new Promise((res,rej)=>{const sc=document.createElement("script");
+    sc.src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";sc.onload=res;sc.onerror=()=>{tessLoading=null;rej()};document.head.appendChild(sc)});
+  return tessLoading;
+}
+function prepForOcr(img){
+  const max=2000,sc=Math.min(1,max/Math.max(img.naturalWidth,img.naturalHeight));
+  const c=document.createElement("canvas");c.width=Math.round(img.naturalWidth*sc);c.height=Math.round(img.naturalHeight*sc);
+  const x=c.getContext("2d",{willReadFrequently:true});x.drawImage(img,0,0,c.width,c.height);
+  const im=x.getImageData(0,0,c.width,c.height),d=im.data;
+  for(let i=0;i<d.length;i+=4){let v=(d[i]*299+d[i+1]*587+d[i+2]*114)/1000;v=Math.max(0,Math.min(255,(v-128)*1.35+128));d[i]=d[i+1]=d[i+2]=v}
+  x.putImageData(im,0,0);return c;
+}
+function cleanIngredients(t){
+  t=t.replace(/-\s*\n\s*/g,"").replace(/\s*\n\s*/g," ").replace(/\s{2,}/g," ").replace(/[|_~]/g,"").trim();
+  const m=t.match(/ingredientes?\s*[:;.]?\s*/i);
+  if(m)t=t.slice(m.index+m[0].length);
+  const cut=t.search(/al[eé]rgic|n[aã]o cont[eé]m gl[uú]ten|cont[eé]m gl[uú]ten|cont[eé]m lactose|pode conter|informa[cç][aã]o nutricional|conservar em|validade|lote\b/i);
+  if(cut>0)t=t.slice(0,cut);
+  t=t.replace(/\s*,\s*/g,", ").replace(/[\s,;.]+$/,"").trim();
+  if(t)t=t.charAt(0).toUpperCase()+t.slice(1).toLowerCase();
+  return t+(t?".":"");
+}
+$("fotoIng").addEventListener("change",async e=>{
+  const f=e.target.files[0];e.target.value="";if(!f)return;
+  const prog=p=>istatus("info",`<span class="spin" aria-hidden="true"></span>Lendo os ingredientes…<div class="bar2"><span style="width:${Math.round(p*100)}%"></span></div>`);
+  istatus("info",'<span class="spin" aria-hidden="true"></span>Preparando a leitura… Na primeira vez demora um pouco mais.');
+  try{
+    await loadTesseract();
+    const img=await loadImage(f);
+    const worker=await Tesseract.createWorker("por",1,{logger:m=>{if(m.status==="recognizing text")prog(m.progress)}});
+    const {data}=await worker.recognize(prepForOcr(img));
+    await worker.terminate();
+    const txt=cleanIngredients(data.text||"");
+    if(txt.length<4){istatus("err","Não consegui ler o texto nessa foto. Tente de novo com a lista de ingredientes ocupando a tela, bem iluminada, reta e sem reflexo.");return}
+    $("ingredientes").value=txt;update();
+    istatus("warn","Pronto! Dê uma conferida no texto: a leitura por foto pode trocar alguma letra. Se precisar, corrija direto no campo.");
+  }catch(err){istatus("err","Não consegui fazer a leitura agora. Confira se o celular está com internet e tente de novo.")}
 });
 $("codeForm").addEventListener("submit",e=>{e.preventDefault();lookup($("codigo").value)});
 </script>
